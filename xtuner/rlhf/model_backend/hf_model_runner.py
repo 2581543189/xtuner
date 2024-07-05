@@ -821,12 +821,12 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
                     attention_mask_mb = []
                     position_ids_mb = []
                     labels_mb = []
-                    for i in range(len(micro_batch)):
-                        input_ids_mb.append(micro_batch[i]['input_ids'])
-                        attention_mask_mb.append(micro_batch[i]['attention_mask'])
-                        position_ids_mb.append(micro_batch[i]['position_ids'])
-                        labels_mb.append(micro_batch[i]['labels'])
-                    object_ref = self.ray_actors[rank].infer.remote(
+                    for j in range(len(micro_batch)):
+                        input_ids_mb.append(micro_batch[j]['input_ids'])
+                        attention_mask_mb.append(micro_batch[j]['attention_mask'])
+                        position_ids_mb.append(micro_batch[j]['position_ids'])
+                        labels_mb.append(micro_batch[j]['labels'])
+                    object_ref = self.ray_actors[rank].train.remote(
                         input_ids=input_ids_mb,
                         attention_mask=attention_mask_mb,
                         position_ids=position_ids_mb,

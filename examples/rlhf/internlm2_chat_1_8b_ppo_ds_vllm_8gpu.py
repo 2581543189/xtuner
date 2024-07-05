@@ -96,18 +96,18 @@ model_configs = dict(
                 total_steps=1e9,
                 lr_decay_rate=1,
             ),
-            parallel=dict(
-                data=dict(size=POLICY_DP_SIZE, mode='deepspeed'),
-                tensor=dict(size=1, mode='1d'),
-                pipeline=dict(size=1, interleaved_overlap=False),
-                sequence=dict(size=1),
-            ),
             # parallel=dict(
-            #     data=dict(size=1, mode='deepspeed'),
+            #     data=dict(size=POLICY_DP_SIZE, mode='deepspeed'),
             #     tensor=dict(size=1, mode='1d'),
             #     pipeline=dict(size=1, interleaved_overlap=False),
-            #     sequence=dict(size=2),
+            #     sequence=dict(size=1),
             # ),
+            parallel=dict(
+                data=dict(size=1, mode='deepspeed'),
+                tensor=dict(size=1, mode='1d'),
+                pipeline=dict(size=1, interleaved_overlap=False),
+                sequence=dict(size=2),
+            ),
             envs=dict(
                 ACCELERATE_USE_DEEPSPEED="true",
             ),

@@ -4,7 +4,7 @@ from loguru import logger
 def get_gpu_requirement(trainer_config: dict) -> int:
     # Calculates the number of GPUs required for a given trainer configuration.
     return get_dp_size(trainer_config) * get_tp_size(
-        trainer_config) * get_pp_size(trainer_config)
+        trainer_config) * get_pp_size(trainer_config) * get_sp_size(trainer_config)
 
 
 def get_resource_requirement(model_configs: dict) -> dict:
@@ -63,3 +63,11 @@ def get_pp_size(trainer_config: dict) -> int:
         data = parallel.get('pipeline', {'size': 1})
         pp_size = data['size']
     return pp_size
+
+def get_sp_size(trainer_config: dict) -> int:
+    sp_size = 1
+    if 'parallel' in trainer_config:
+        parallel = trainer_config['parallel']
+        data = parallel.get('sequence', {'size': 1})
+        sp_size = data['size']
+    return sp_size

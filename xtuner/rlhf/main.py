@@ -86,8 +86,8 @@ if __name__ == '__main__':
     prompt_mes_iter = MessageIter(
         tokenizer=ref_model.tokenizer, **prompt_dataset_config)
     pretrain_dataset_config = config.get('pretrain_dataset_config', {})
-    pretrain_mes_iter = MessageIter(
-        tokenizer=ref_model.tokenizer, **pretrain_dataset_config)
+    # pretrain_mes_iter = MessageIter(
+    #     tokenizer=ref_model.tokenizer, **pretrain_dataset_config)
 
     # init txt env
     rollout_config = config.get('rollout_config', {})
@@ -95,7 +95,7 @@ if __name__ == '__main__':
         policy_model=policy_model,
         reward_model=reward_model,
         prompt_mes_iter=prompt_mes_iter,
-        pretrain_mes_iter=pretrain_mes_iter,  # None
+        pretrain_mes_iter=None,  # None
         **rollout_config,
     )
     # init repeater

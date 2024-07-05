@@ -31,6 +31,17 @@ from .generate_utils import (get_answer_str, get_question_answer_mask,
 from .ray_actor_group import RayActorGroup
 from .ray_actor_mixin import RayActorMixin
 from .ray_utils import DEFAULT_NUM_CPUS, DEFAULT_NUM_GPUS, create_ray_actors
+from ..config.config_utils import get_sp_size
+from xtuner.model.modules import dispatch_modules
+from xtuner.parallel.sequence import (
+    init_sequence_parallel,
+    pad_for_sequence_parallel,
+    get_sequence_parallel_world_size,
+    get_sequence_parallel_group,
+    split_for_sequence_parallel,
+    reduce_sequence_parallel_loss,
+)
+
 
 DEFAULT_NEW_TOKENS = 64
 MAXIMUM_NEW_TOKENS = 1024
@@ -56,6 +67,7 @@ class HfModelRunner:
         parallel: dict = self.model_config['parallel']
         assert parallel['tensor']['size'] == 1  # TODO: support TP
         assert parallel['pipeline']['size'] == 1  # TODO: support PP
+        
         self.update_step = 0
         self.zero_stage = 1
         mixed_precision = self.model_config.get('mixed_precision', None)
@@ -73,7 +85,11 @@ class HfModelRunner:
         else:
             self.accelerator = Accelerator(mixed_precision=mixed_precision)
             self.zero_stage = 0
-
+        
+        self.sp_size = get_sp_size(self.model_config)
+        if self.sp_size > 1:
+            init_sequence_parallel(self.sp_size)
+        
         # 1. Model
         model_path = self.model_config.get('model_path')
         self.model_type = self.model_config.get('model_type', '').lower()
@@ -89,6 +105,8 @@ class HfModelRunner:
             attn_implementation='flash_attention_2'
             if use_flash_attn else None,
         )
+        if self.sp_size > 1:
+            dispatch_modules(self.model.model)
 
         # Graident checkpointing
         gradient_checkpointing = self.model_config.get(
@@ -172,6 +190,7 @@ class HfModelRunner:
         loss_weight: Optional[float] = None,
         **_ignored,
     ) -> torch.Tensor:
+        
         input_ids = input_ids.to(self.device)
         labels = input_ids.clone() if labels is None else labels
         if attention_mask is not None:
@@ -188,6 +207,8 @@ class HfModelRunner:
             position_ids.to(self.device) if position_ids is not None else None
         }
         self.model.train()
+        if self.sp_size > 1:
+           batch,  labels = self.split_for_sp(batch, labels)
 
         if criterion is None:
             # OPT. A) Default settings
@@ -212,10 +233,48 @@ class HfModelRunner:
             loss = criterion(logits, labels)
         else:
             raise ValueError(f'labels of unsupported type: {type(labels)}')
+        
+        if self.sp_size > 1:
+            loss = self.reduce_sp_loss(loss, labels)
 
         if loss_weight is not None:
             loss *= loss_weight
         return loss
+    
+    def reduce_sp_loss(self, loss, labels):
+        sp_group = get_sequence_parallel_group()
+        if isinstance(labels, torch.Tensor):
+            num_tokens = (labels != -100).sum()
+            loss = reduce_sequence_parallel_loss(loss, num_tokens, sp_group)
+        elif isinstance(labels, dict):
+            loss = reduce_sequence_parallel_loss(loss, 1, sp_group)
+        return loss
+
+    def split_for_sp(self, batch, labels):
+        batch, labels = self.pad_for_sp(batch, labels)
+        sp_group = get_sequence_parallel_group()
+        for key in batch.keys():
+            if key == 'attention_mask':
+                continue
+            if batch[key] is not None:
+                batch[key] = split_for_sequence_parallel(batch[key], dim=1, sp_group=sp_group)
+        if isinstance(labels, torch.Tensor):
+            labels = split_for_sequence_parallel(labels, dim=1, sp_group=sp_group)
+        elif isinstance(labels, dict):
+            for key in labels.keys():
+                labels[key] = split_for_sequence_parallel(labels[key], dim=1, sp_group=sp_group)
+        return batch, labels
+                
+    def pad_for_sp(self, batch, labels):
+        for key in batch.keys():
+            if batch[key] is not None:
+                batch[key] = pad_for_sequence_parallel(batch[key], 0)
+        if isinstance(labels, torch.Tensor):
+            labels = pad_for_sequence_parallel(labels, -100)
+        elif isinstance(labels, dict):
+            for key in labels.keys():
+                labels[key] = pad_for_sequence_parallel(labels[key], 0)
+        return batch, labels
 
     def parameter_update(self, step_interval=1):
         self.info_rank0(f'[{self.model_type}] self.parameter_update()')
@@ -754,25 +813,28 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
             )
             assert len(micro_batches) == self.dp_size
             object_refs = []
-            for index, micro_batch in enumerate(micro_batches):
-                input_ids_mb = []
-                attention_mask_mb = []
-                position_ids_mb = []
-                labels_mb = []
-                for i in range(len(micro_batch)):
-                    input_ids_mb.append(micro_batch[i]['input_ids'])
-                    attention_mask_mb.append(micro_batch[i]['attention_mask'])
-                    position_ids_mb.append(micro_batch[i]['position_ids'])
-                    labels_mb.append(micro_batch[i]['labels'])
-                object_ref = self.ray_actors[index].train.remote(
-                    input_ids=input_ids_mb,
-                    attention_mask=attention_mask_mb,
-                    position_ids=position_ids_mb,
-                    labels=labels_mb,
-                    *args,
-                    **kwargs,
-                )
-                object_refs.append(object_ref)
+            num_dp_actors = len(self.ray_actors) // self.dp_size
+            for dp_index, micro_batch in enumerate(micro_batches):
+                for i in range(num_dp_actors):
+                    rank = dp_index * num_dp_actors + i
+                    input_ids_mb = []
+                    attention_mask_mb = []
+                    position_ids_mb = []
+                    labels_mb = []
+                    for i in range(len(micro_batch)):
+                        input_ids_mb.append(micro_batch[i]['input_ids'])
+                        attention_mask_mb.append(micro_batch[i]['attention_mask'])
+                        position_ids_mb.append(micro_batch[i]['position_ids'])
+                        labels_mb.append(micro_batch[i]['labels'])
+                    object_ref = self.ray_actors[rank].infer.remote(
+                        input_ids=input_ids_mb,
+                        attention_mask=attention_mask_mb,
+                        position_ids=position_ids_mb,
+                        labels=labels_mb,
+                        *args,
+                        **kwargs,
+                    )
+                    object_refs.append(object_ref) 
             return object_refs
 
     def train_get(self, object_refs, timeout=None):
@@ -797,14 +859,20 @@ class HfModelRunnerRayActorGroup(RayActorGroup):
                                                       micro_batch_size,
                                                       attention_mask)
         assert len(micro_batches) == self.dp_size
-        return [
-            self.ray_actors[index].infer.remote(
-                input_ids=micro_batch['input_ids'],
-                attention_mask=micro_batch['attention_mask'],
-                *args,
-                **kwargs,
-            ) for index, micro_batch in enumerate(micro_batches)
-        ]
+        object_refs = []
+        num_dp_actors = len(self.ray_actors) // self.dp_size
+        for dp_index, micro_batch in enumerate(micro_batches):
+            for i in range(num_dp_actors):
+                rank = dp_index * num_dp_actors + i
+                object_ref = self.ray_actors[rank].infer.remote(
+                    input_ids=micro_batch['input_ids'],
+                    attention_mask=micro_batch['attention_mask'],
+                    *args,
+                    **kwargs,
+                )
+                if i == 0:
+                   object_refs.append(object_ref) 
+        return object_refs
 
     def infer_get(self, object_refs, timeout=None):
         outputs = ray.get(object_refs, timeout=timeout)

@@ -8,6 +8,7 @@ from ..model_server.base_model_server import BaseModelServer
 from ..timer import Timer
 from .base import EnvBase
 from .utils import SYSTEM_PROMPT
+from xtuner.rlhf.dataset.pt_dataloader import get_pretrain_data
 
 
 class TxtEnv(EnvBase):
@@ -31,8 +32,12 @@ class TxtEnv(EnvBase):
         self.reward_model = reward_model
 
         self.prompt_mes_iter = iter(prompt_mes_iter)
-        self.pretrain_mes_iter = iter(
-            pretrain_mes_iter) if pretrain_mes_iter.message_datasets else None
+        self.pretrain_mes_iter = get_pretrain_data(
+        folder="/fs-computility/llm/shared/zhaoqian/dataset/pretrain/1226-mix-v13-complete-watermark-pjx50/train",
+            batch_size=32,
+            length=32 * 1024
+        )
+        #iter(pretrain_mes_iter) if pretrain_mes_iter.message_datasets else None
 
         self.max_new_tokens = max_new_tokens
         self.policy_micro_bs = policy_micro_bs
@@ -83,24 +88,28 @@ class TxtEnv(EnvBase):
 
         # pretrain data
         if self.pretrain_mes_iter is not None:
-            pretrain_datas = deepcopy(next(self.pretrain_mes_iter))
-            pretrain_input_messages = []
-            for data in pretrain_datas:
-                assert data.mes_type == 'pretrain'
-                pretrain_input_messages.append(message)
+            pretrain_data = deepcopy(next(self.pretrain_mes_iter))
+            trajectories["pretrain_data"] = pretrain_data
+            logger.info(f'[TxtEnv] gets {pretrain_data["input_ids"].shape} pretrain data.')
+            # torch.save(pretrain_data['input_ids'],'/fs-computility/llm/zhaohui/workspace/test_0628/xtuner/input_ids.pt')
+            # pretrain_datas = deepcopy(next(self.pretrain_mes_iter))
+            # pretrain_input_messages = []
+            # for data in pretrain_datas:
+            #     assert data.mes_type == 'pretrain'
+            #     pretrain_input_messages.append(message)
 
-            from xtuner.rlhf.tokenizer import encode_inputs
-            pt_input_ids, pt_attention_mask = encode_inputs(
-                pretrain_input_messages, self.policy_model.tokenizer)
-            pretrain_labels = torch.nn.functional.pad(
-                pt_input_ids[:, 1:], (0, 1), mode='constant', value=-100)
+            # from xtuner.rlhf.tokenizer import encode_inputs
+            # pt_input_ids, pt_attention_mask = encode_inputs(
+            #     pretrain_input_messages, self.policy_model.tokenizer)
+            # pretrain_labels = torch.nn.functional.pad(
+            #     pt_input_ids[:, 1:], (0, 1), mode='constant', value=-100)
 
-            trajectories.pretrain_data = {
-                'input_ids': pt_input_ids,
-                'labels': pretrain_labels,
-                'attention_mask': pt_attention_mask
-            }
-            logger.info(f'[TxtEnv] gets {pt_input_ids.shape} pretrain data.')
+            # trajectories.pretrain_data = {
+            #     'input_ids': pt_input_ids,
+            #     'labels': pretrain_labels,
+            #     'attention_mask': pt_attention_mask
+            # }
+            # logger.info(f'[TxtEnv] gets {pt_input_ids.shape} pretrain data.')
         else:
             trajectories.pretrain_data = None
 
